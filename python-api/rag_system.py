@@ -24,6 +24,20 @@ os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
 os.environ["LANGCHAIN_PROJECT"] = "budget-rag-assistant"
 
+# Vérification des chemins
+print("\n==== VÉRIFICATION DES CHEMINS ====")
+csv_path = os.getenv("CSV_PATH", "../data/transactions.csv")
+persist_directory = os.getenv("PERSIST_DIRECTORY", "../db")
+
+print(f"Chemin CSV configuré: {csv_path}")
+print(f"Chemin absolu CSV: {os.path.abspath(csv_path)}")
+print(f"Le fichier CSV existe: {os.path.exists(csv_path)}")
+
+print(f"Répertoire de persistance configuré: {persist_directory}")
+print(f"Chemin absolu du répertoire de persistance: {os.path.abspath(persist_directory)}")
+print(f"Le répertoire de persistance existe: {os.path.exists(persist_directory)}")
+print("================================\n")
+
 client = Client()
 tracer = LangChainTracer(project_name="budget-rag-assistant")
 
@@ -44,6 +58,10 @@ class BudgetRAG:
         self.qa_chain = None
         self.user_ids = set()
         
+        print(f"BudgetRAG initialisé avec:")
+        print(f"- CSV: {self.csv_path} (existe: {os.path.exists(self.csv_path)})")
+        print(f"- Persistance: {self.persist_directory} (existe: {os.path.exists(self.persist_directory)})")
+        
     def load_and_process_data(self, force_reload: bool = False) -> None:
         """
         Charge et prétraite les données de transactions
@@ -51,37 +69,83 @@ class BudgetRAG:
         Args:
             force_reload: Si True, force le rechargement des données même si la base vectorielle existe
         """
-        # Vérifier si la base vectorielle existe déjà
+        # Vérifier si le fichier CSV existe
+        if not os.path.exists(self.csv_path):
+            raise FileNotFoundError(f"Le fichier CSV {self.csv_path} n'existe pas! Chemin absolu: {os.path.abspath(self.csv_path)}")
+        
+        # Charger d'abord tous les UUID des utilisateurs depuis le CSV
+        print(f"Chargement des utilisateurs depuis {self.csv_path}...")
+        try:
+            df = pd.read_csv(self.csv_path)
+            print(f"Colonnes du CSV: {df.columns.tolist()}")
+            
+            # Vérifier la présence de la colonne user_uuid
+            if 'user_uuid' not in df.columns:
+                raise ValueError(f"La colonne 'user_uuid' n'existe pas dans le CSV! Colonnes disponibles: {df.columns.tolist()}")
+            
+            # Stocker tous les UUID des utilisateurs, même si on ne recharge pas la base vectorielle
+            self.user_ids = set(df['user_uuid'].unique())
+            print(f"CSV chargé avec succès. Nombre d'utilisateurs uniques: {len(self.user_ids)}")
+            
+            # Débogage - Vérifier quelques UUID
+            if len(self.user_ids) > 0:
+                print("Exemples d'UUIDs disponibles:")
+                for i, uid in enumerate(list(self.user_ids)[:3]):
+                    print(f"  {i+1}. {uid}")
+        except Exception as e:
+            raise RuntimeError(f"Erreur lors du chargement du CSV: {str(e)}")
+        
+        # Vérifier si la base vectorielle existe déjà et si on doit la recharger
         if os.path.exists(self.persist_directory) and not force_reload:
             print("Chargement de la base vectorielle existante...")
-            self.vectorstore = Chroma(
-                persist_directory=self.persist_directory,
-                embedding_function=self.embeddings
-            )
-            
-            # Récupérer la liste des user_ids
-            all_docs = self.vectorstore.get()
-            metadata_list = all_docs.get('metadatas', [])
-            self.user_ids = {m.get('user_uuid') for m in metadata_list if m.get('user_uuid')}
-            print(f"Base chargée avec {len(self.user_ids)} utilisateurs uniques.")
-            return
+            try:
+                self.vectorstore = Chroma(
+                    persist_directory=self.persist_directory,
+                    embedding_function=self.embeddings
+                )
+                print(f"Base vectorielle chargée avec succès!")
+                return
+            except Exception as e:
+                print(f"Erreur lors du chargement de la base vectorielle: {str(e)}")
+                print("Recréation de la base vectorielle...")
+        elif not os.path.exists(self.persist_directory):
+            print(f"Le répertoire de persistance {self.persist_directory} n'existe pas. Création d'une nouvelle base vectorielle...")
+        else:
+            print("Force reload activé. Création d'une nouvelle base vectorielle...")
         
-        print("Chargement et traitement des données de transactions...")
-        # Charger les données CSV
-        df = pd.read_csv(self.csv_path)
-        
+        print("Traitement des données de transactions pour la vectorisation...")
         # Convertir les montants en float (si nécessaire)
-        if df['Net Amount'].dtype == 'object':
-            df['Net Amount'] = df['Net Amount'].str.replace(',', '.').astype(float)
-        
-        # Collecter tous les user_ids
-        self.user_ids = set(df['User UUID'].unique())
+        if df['net_amount'].dtype == 'object':
+            print("Conversion des montants en format numérique...")
+            
+            # Fonction de nettoyage qui gère différents formats de montants
+            def clean_amount(amount_str):
+                if pd.isna(amount_str):
+                    return 0.0
+                
+                if isinstance(amount_str, (int, float)):
+                    return float(amount_str)
+                
+                # Supprimer les espaces (séparateurs de milliers)
+                cleaned = str(amount_str).replace(' ', '')
+                # Remplacer les virgules par des points (séparateur décimal)
+                cleaned = cleaned.replace(',', '.')
+                
+                try:
+                    return float(cleaned)
+                except ValueError:
+                    print(f"AVERTISSEMENT: Impossible de convertir '{amount_str}' en nombre, utilisé 0.0 à la place")
+                    return 0.0
+            
+            # Appliquer la fonction de nettoyage à la colonne
+            df['net_amount'] = df['net_amount'].apply(clean_amount)
+            print(f"Conversion terminée. Exemple de valeurs: {df['net_amount'].head(3).tolist()}")
         
         # Créer des documents pour chaque transaction avec métadonnées
         documents = []
         
         for user_id in self.user_ids:
-            user_df = df[df['User UUID'] == user_id]
+            user_df = df[df['user_uuid'] == user_id]
             
             # Créer un document de résumé pour chaque utilisateur
             summary_stats = self._generate_user_summary(user_df)
@@ -102,11 +166,11 @@ class BudgetRAG:
             
             # Traiter chaque transaction de l'utilisateur
             for _, row in user_df.iterrows():
-                date = row['Date']
-                description = row['Description Clean']
-                amount = row['Net Amount']
-                category = row['Category Name']
-                parent_category = row['Parent Name']
+                date = row['date']
+                description = row['description_clean']
+                amount = row['net_amount']
+                category = row['category_name']
+                parent_category = row['parent_name']
                 
                 # Créer le contenu de la transaction
                 content = f"Transaction du {date}: {description}, Montant: {amount} €, "
@@ -126,10 +190,10 @@ class BudgetRAG:
                 ))
                 
             # Ajouter un document par catégorie pour cet utilisateur
-            for category in user_df['Category Name'].unique():
-                category_df = user_df[user_df['Category Name'] == category]
-                total_amount = category_df['Net Amount'].sum()
-                avg_amount = category_df['Net Amount'].mean()
+            for category in user_df['category_name'].unique():
+                category_df = user_df[user_df['category_name'] == category]
+                total_amount = category_df['net_amount'].sum()
+                avg_amount = category_df['net_amount'].mean()
                 count = len(category_df)
                 
                 content = f"Résumé de la catégorie {category} pour l'utilisateur {user_id}:\n"
@@ -176,12 +240,12 @@ class BudgetRAG:
         Returns:
             Dict contenant les statistiques résumées
         """
-        start_date = user_df['Date'].min()
-        end_date = user_df['Date'].max()
+        start_date = user_df['date'].min()
+        end_date = user_df['date'].max()
         total_transactions = len(user_df)
-        total_spent = user_df[user_df['Net Amount'] < 0]['Net Amount'].sum() * -1
-        total_received = user_df[user_df['Net Amount'] > 0]['Net Amount'].sum()
-        top_categories = user_df['Category Name'].value_counts().head(5).index.tolist()
+        total_spent = user_df[user_df['net_amount'] < 0]['net_amount'].sum() * -1
+        total_received = user_df[user_df['net_amount'] > 0]['net_amount'].sum()
+        top_categories = user_df['category_name'].value_counts().head(5).index.tolist()
         
         return {
             'start_date': start_date,
@@ -205,6 +269,7 @@ class BudgetRAG:
         # Vérifier si l'utilisateur existe
         if user_uuid not in self.user_ids:
             print(f"Utilisateur {user_uuid} non trouvé dans la base de données.")
+            print(f"UUIDs disponibles: {list(self.user_ids)[:5]} (et {len(self.user_ids) - 5} autres)")
             return False
         
         # Créer un retriever spécifique à l'utilisateur
@@ -359,16 +424,32 @@ def create_rag_system(csv_path: str, persist_directory: str = "db"):
     Returns:
         BudgetRAG: Instance du système RAG
     """
+    print("\n==== CRÉATION DU SYSTÈME RAG ====")
+    print(f"CSV path: {csv_path} (absolu: {os.path.abspath(csv_path)})")
+    print(f"Persist dir: {persist_directory} (absolu: {os.path.abspath(persist_directory)})")
+    
     rag = BudgetRAG(csv_path, persist_directory)
     rag.load_and_process_data()
+    
+    print(f"Système RAG créé avec {len(rag.user_ids)} utilisateurs")
     return rag
 
 if __name__ == "__main__":
     # Test du système RAG
-    rag = create_rag_system("./data/transactions.csv")
+    rag = create_rag_system(csv_path, persist_directory)
     
-    # Exemple d'utilisation
-    user_id = "some-user-uuid"
-    if rag.initialize_retriever_for_user(user_id):
-        result = rag.ask_question("Quelles sont mes dépenses les plus importantes ce mois-ci?")
-        print(result["answer"])
+    # Afficher les UUIDs disponibles
+    print("\nUtilisateurs disponibles:")
+    for i, user_id in enumerate(list(rag.user_ids)[:5]):
+        print(f"{i+1}. {user_id}")
+    
+    # Exemple d'utilisation (si des utilisateurs existent)
+    if rag.user_ids:
+        user_id = next(iter(rag.user_ids))
+        print(f"\nTest avec l'utilisateur: {user_id}")
+        if rag.initialize_retriever_for_user(user_id):
+            result = rag.ask_question("Quelles sont mes dépenses les plus importantes ce mois-ci?")
+            print("\nRéponse:")
+            print(result["answer"])
+    else:
+        print("\nAucun utilisateur trouvé pour le test!")

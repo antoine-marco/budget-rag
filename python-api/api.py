@@ -1,10 +1,12 @@
 # api.py
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import uvicorn
 import os
+import traceback
 from dotenv import load_dotenv
 
 # Importer notre système RAG
@@ -14,8 +16,13 @@ from rag_system import create_rag_system, BudgetRAG
 load_dotenv()
 
 # Initialiser le système RAG
-csv_path = os.getenv("CSV_PATH", "./data/transactions.csv")
-persist_directory = os.getenv("PERSIST_DIRECTORY", "./db")
+csv_path = os.getenv("CSV_PATH", "../data/transactions.csv")
+persist_directory = os.getenv("PERSIST_DIRECTORY", "../db")
+
+# Vérifier les chemins
+print(f"Chemin CSV configuré: {csv_path}")
+print(f"Chemin absolu CSV: {os.path.abspath(csv_path)}")
+print(f"Le fichier CSV existe: {os.path.exists(csv_path)}")
 
 # Créer l'application FastAPI
 app = FastAPI(title="BudgetRAG API", description="API pour l'assistant budgétaire RAG")
@@ -54,10 +61,27 @@ def get_rag_system() -> BudgetRAG:
     global rag_system
     if rag_system is None:
         print("Initialisation du système RAG...")
-        rag_system = create_rag_system(csv_path, persist_directory)
+        try:
+            rag_system = create_rag_system(csv_path, persist_directory)
+        except Exception as e:
+            error_msg = f"Erreur lors de l'initialisation du système RAG: {str(e)}"
+            print(error_msg)
+            print(traceback.format_exc())
+            raise RuntimeError(error_msg)
     return rag_system
 
-# Routes API
+# Gestionnaire d'exceptions global
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    error_msg = f"Une erreur inattendue s'est produite: {str(exc)}"
+    print(error_msg)
+    print(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": error_msg},
+    )
+
+# Route racine
 @app.get("/")
 def read_root():
     """
@@ -69,13 +93,21 @@ def read_root():
         "documentation": "/docs"
     }
 
+# Routes API
 @app.post("/api/check-user", response_model=UserExistsResponse)
 def check_user(request: UserExistsRequest, rag: BudgetRAG = Depends(get_rag_system)):
     """
     Vérifie si un utilisateur existe dans la base de données
     """
-    exists = request.user_uuid in rag.user_ids
-    return UserExistsResponse(exists=exists)
+    try:
+        exists = request.user_uuid in rag.user_ids
+        print(f"Vérification de l'utilisateur {request.user_uuid}: {exists}")
+        return UserExistsResponse(exists=exists)
+    except Exception as e:
+        error_msg = f"Erreur lors de la vérification de l'utilisateur: {str(e)}"
+        print(error_msg)
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/api/ask", response_model=QuestionResponse)
 def ask_question(request: QuestionRequest, rag: BudgetRAG = Depends(get_rag_system)):
@@ -111,6 +143,20 @@ def get_users(rag: BudgetRAG = Depends(get_rag_system)):
     Note: Dans un environnement de production, cette route devrait être sécurisée
     """
     return list(rag.user_ids)
+
+# Route de santé
+@app.get("/api/health")
+def health_check():
+    """
+    Vérifie l'état de santé de l'API
+    """
+    return {
+        "status": "healthy",
+        "csv_path": csv_path,
+        "csv_exists": os.path.exists(csv_path),
+        "db_path": persist_directory,
+        "db_exists": os.path.exists(persist_directory)
+    }
 
 if __name__ == "__main__":
     # Lancer le serveur API

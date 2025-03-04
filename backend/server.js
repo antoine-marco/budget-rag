@@ -9,7 +9,7 @@ const path = require('path');
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001; // Modifié de 5000 à 5001
 
 // URL de l'API Python RAG
 const RAG_API_URL = process.env.RAG_API_URL || 'http://localhost:8000';
@@ -26,6 +26,15 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../frontend/build')));
 }
 
+// Route de statut pour vérifier si le serveur fonctionne
+app.get('/status', (req, res) => {
+  res.json({
+    status: 'online',
+    timestamp: new Date().toISOString(),
+    api_connection: RAG_API_URL
+  });
+});
+
 // Routes API
 app.post('/api/check-user', async (req, res) => {
   try {
@@ -34,6 +43,8 @@ app.post('/api/check-user', async (req, res) => {
     if (!user_uuid) {
       return res.status(400).json({ error: 'UUID utilisateur requis' });
     }
+    
+    console.log(`Vérification de l'utilisateur: ${user_uuid}`);
     
     // Vérifier l'existence de l'utilisateur via l'API Python
     const response = await axios.post(`${RAG_API_URL}/api/check-user`, { user_uuid });
@@ -61,6 +72,8 @@ app.post('/api/ask', async (req, res) => {
       return res.status(400).json({ error: 'UUID utilisateur et question requis' });
     }
     
+    console.log(`Question de l'utilisateur ${user_uuid}: "${question}"`);
+    
     // Poser la question via l'API Python
     const response = await axios.post(`${RAG_API_URL}/api/ask`, { 
       user_uuid, 
@@ -85,6 +98,8 @@ app.post('/api/ask', async (req, res) => {
 // Route pour obtenir la liste des utilisateurs disponibles (pour le développement)
 app.get('/api/users', async (req, res) => {
   try {
+    console.log('Récupération de la liste des utilisateurs');
+    
     // Récupérer la liste des utilisateurs via l'API Python
     const response = await axios.get(`${RAG_API_URL}/api/users`);
     
