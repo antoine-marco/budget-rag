@@ -1,19 +1,18 @@
 # rag_system.py
 import os
 import pandas as pd
-from typing import List, Dict, Any
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from typing import List, Dict, Any, Optional
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain_community.chat_models import ChatOpenAI
-from langchain.callbacks.tracers import LangChainTracer
 from langchain.prompts import PromptTemplate
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
 from langsmith import Client
 import numpy as np
 from dotenv import load_dotenv
+import traceback
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -39,7 +38,6 @@ print(f"Le répertoire de persistance existe: {os.path.exists(persist_directory)
 print("================================\n")
 
 client = Client()
-tracer = LangChainTracer(project_name="budget-rag-assistant")
 
 class BudgetRAG:
     def __init__(self, csv_path: str, persist_directory: str = "db"):
@@ -296,34 +294,24 @@ class BudgetRAG:
         Contexte des transactions:
         {context}
         
-        Historique de la conversation:
-        {chat_history}
-        
-        Question: {question}
+        Question: {input}
         
         Réponse:
         """
         
         PROMPT = PromptTemplate(
             template=prompt_template,
-            input_variables=["context", "chat_history", "question"]
+            input_variables=["context", "input"]
         )
         
-        # Initialiser la mémoire de conversation
-        memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
+        # Créer le LLM
+        llm = ChatOpenAI(temperature=0, model="gpt-4")
         
-        # Créer la chaîne de question-réponse
-        self.qa_chain = ConversationalRetrievalChain.from_llm(
-            llm=ChatOpenAI(temperature=0, model="gpt-4"),
-            retriever=self.retriever,
-            memory=memory,
-            combine_docs_chain_kwargs={"prompt": PROMPT},
-            return_source_documents=True,
-            callbacks=[tracer]
-        )
+        # Créer la chaîne de documents
+        combine_docs_chain = create_stuff_documents_chain(llm, PROMPT)
+        
+        # Créer la chaîne de récupération
+        self.qa_chain = create_retrieval_chain(self.retriever, combine_docs_chain)
         
         print(f"Retriever initialisé pour l'utilisateur {user_uuid}")
         return True
@@ -353,19 +341,50 @@ class BudgetRAG:
                 }
             
             # Poser la question au système RAG
-            result = self.qa_chain({"question": question})
+            print(f"Envoi de la question: '{question}' au système RAG")
+            result = self.qa_chain.invoke({"input": question})
+            print(f"Structure de réponse reçue: {list(result.keys())}")
             
-            # Extraire la réponse et les sources
-            answer = result.get("answer", "")
-            source_docs = result.get("source_documents", [])
+            # Extraire la réponse
+            answer = ""
+            if "answer" in result:
+                answer = result["answer"]
+            else:
+                # Chercher dans d'autres clés possibles
+                print(f"Clés disponibles: {list(result.keys())}")
+                if hasattr(result, "get"):
+                    for key in result.keys():
+                        if key != "context" and isinstance(result[key], str):
+                            answer = result[key]
+                            print(f"Réponse trouvée dans la clé: {key}")
+                            break
             
-            # Formater les sources pour le frontend
+            # Extraire les sources - nouvelle structure
             sources = []
-            for doc in source_docs:
-                sources.append({
-                    "content": doc.page_content,
-                    "metadata": doc.metadata
-                })
+            
+            # Vérifier la structure pour localiser les documents
+            if "context" in result:
+                context_docs = result["context"]
+                print(f"Nombre de documents de contexte: {len(context_docs)}")
+                for doc in context_docs:
+                    if hasattr(doc, "page_content") and hasattr(doc, "metadata"):
+                        sources.append({
+                            "content": doc.page_content,
+                            "metadata": doc.metadata
+                        })
+            # Nouvelle alternative pour certaines versions de LangChain
+            elif "retrieved_documents" in result:
+                docs = result["retrieved_documents"]
+                print(f"Nombre de documents récupérés: {len(docs)}")
+                for doc in docs:
+                    if hasattr(doc, "page_content") and hasattr(doc, "metadata"):
+                        sources.append({
+                            "content": doc.page_content,
+                            "metadata": doc.metadata
+                        })
+            
+            print(f"Réponse trouvée: {answer[:50]}... (tronquée)")
+            print(f"Nombre de sources: {len(sources)}")
             
             return {
                 "answer": answer,
@@ -373,6 +392,8 @@ class BudgetRAG:
             }
             
         except Exception as e:
+            print(f"Erreur dans ask_question: {str(e)}")
+            traceback.print_exc()
             return {
                 "answer": f"Une erreur s'est produite: {str(e)}",
                 "sources": []

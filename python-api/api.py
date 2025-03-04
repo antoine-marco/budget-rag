@@ -9,8 +9,8 @@ import os
 import traceback
 from dotenv import load_dotenv
 
-# Importer notre système RAG
-from rag_system import create_rag_system, BudgetRAG
+# Importer notre système RAG mis à jour
+from rag_system_fixed import create_rag_system, BudgetRAG
 
 # Charger les variables d'environnement
 load_dotenv()
@@ -128,13 +128,26 @@ def ask_question(request: QuestionRequest, rag: BudgetRAG = Depends(get_rag_syst
             detail="Erreur lors de l'initialisation du retriever pour l'utilisateur."
         )
     
-    # Poser la question
-    result = rag.ask_question(request.question)
-    
-    return QuestionResponse(
-        answer=result["answer"],
-        sources=result["sources"]
-    )
+    try:
+        # Poser la question
+        result = rag.ask_question(request.question)
+        
+        # Vérification supplémentaire
+        if not result.get("answer"):
+            raise HTTPException(
+                status_code=500,
+                detail="Le système RAG n'a pas pu générer de réponse."
+            )
+            
+        return QuestionResponse(
+            answer=result["answer"],
+            sources=result["sources"]
+        )
+    except Exception as e:
+        error_msg = f"Erreur lors du traitement de la question: {str(e)}"
+        print(error_msg)
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.get("/api/users", response_model=List[str])
 def get_users(rag: BudgetRAG = Depends(get_rag_system)):
@@ -160,4 +173,4 @@ def health_check():
 
 if __name__ == "__main__":
     # Lancer le serveur API
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api_fixed:app", host="0.0.0.0", port=8000, reload=True)
