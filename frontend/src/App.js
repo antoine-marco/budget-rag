@@ -4,7 +4,7 @@ import './App.css';
 import axios from 'axios';
 
 // URL du backend
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3000';
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:5001';
 
 function App() {
   const [userUuid, setUserUuid] = useState('');
