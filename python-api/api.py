@@ -10,7 +10,7 @@ import traceback
 from dotenv import load_dotenv
 
 # Importer notre système RAG mis à jour
-from rag_system_fixed import create_rag_system, BudgetRAG
+from rag_system import create_rag_system, BudgetRAG
 
 # Charger les variables d'environnement
 load_dotenv()
